@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>แอปวัดพื้นที่ GPS (Improved Precision)</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&family=Kanit:wght@300;400;600&display=swap');
+        body { font-family: 'Kanit', 'Inter', sans-serif; }
+        canvas { image-rendering: antialiased; }
+    </style>
+</head>
+<body class="bg-gray-900 text-gray-100 min-h-screen flex items-center justify-center p-4">
+
+    <div class="bg-gray-800 p-6 rounded-3xl shadow-2xl w-full max-w-md space-y-5 border border-gray-700">
+        <h1 class="text-2xl font-bold text-center text-blue-400 italic">🛰️ GPS AREA PRO</h1>
+
+        <div class="grid grid-cols-2 gap-3">
+            <div class="bg-gray-700/50 p-3 rounded-xl border border-gray-600">
+                <p class="text-xs text-gray-400">ความแม่นยำปัจจุบัน</p>
+                <p id="accuracy-val" class="text-lg font-bold text-yellow-400">-- <span class="text-xs">ม.</span></p>
+            </div>
+            <div class="bg-gray-700/50 p-3 rounded-xl border border-gray-600">
+                <p class="text-xs text-gray-400">สถานะสัญญาณ</p>
+                <p id="status-text" class="text-lg font-bold text-gray-400">OFF</p>
+            </div>
+        </div>
+
+        <div class="relative bg-gray-900 rounded-2xl overflow-hidden border-2 border-blue-500/30">
+            <canvas id="path-canvas" width="400" height="350" class="w-full h-auto"></canvas>
+            <div class="absolute bottom-2 left-2 flex gap-2">
+                <span class="flex items-center gap-1 text-[10px] bg-black/50 px-2 py-1 rounded text-green-400">● จุดเริ่ม</span>
+                <span class="flex items-center gap-1 text-[10px] bg-black/50 px-2 py-1 rounded text-red-500">● ปัจจุบัน</span>
+            </div>
+        </div>
+
+        <div class="grid grid-cols-2 gap-4">
+            <button id="toggle-gps" class="py-4 rounded-2xl font-bold bg-blue-600 shadow-lg shadow-blue-900/20 active:scale-95 transition-all">เปิด GPS</button>
+            <button id="record-point" class="py-4 rounded-2xl font-bold bg-emerald-600 disabled:opacity-30 disabled:grayscale transition-all" disabled>📍 บันทึกจุด</button>
+        </div>
+
+        <div id="result-card" class="bg-blue-900/20 p-4 rounded-2xl border border-blue-500/20 hidden">
+            <p class="text-blue-400 text-sm mb-1 text-center font-semibold">ผลการคำนวณพื้นที่</p>
+            <div id="result-text" class="text-center"></div>
+        </div>
+
+        <div class="grid grid-cols-2 gap-4">
+            <button id="calc-area" class="py-3 rounded-xl bg-purple-600 font-semibold disabled:opacity-30" disabled>📐 คำนวณ</button>
+            <button id="clear-data" class="py-3 rounded-xl bg-gray-700 hover:bg-red-900/50 font-semibold transition-colors">🗑️ ล้างข้อมูล</button>
+        </div>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('path-canvas'), ctx = canvas.getContext('2d');
+        let points = [], watchId = null, lastPos = null;
+        let posHistory = []; // For smoothing
+
+        function toggleGPS() {
+            const btn = document.getElementById('toggle-gps');
+            if (watchId) {
+                navigator.geolocation.clearWatch(watchId);
+                watchId = null; lastPos = null;
+                btn.textContent = "เปิด GPS"; btn.classList.replace('bg-red-600', 'bg-blue-600');
+                document.getElementById('status-text').textContent = "OFF";
+            } else {
+                btn.textContent = "กำลังหา...";
+                watchId = navigator.geolocation.watchPosition(updatePosition, 
+                    (err) => alert("GPS Error: " + err.message), 
+                    { enableHighAccuracy: true, maximumAge: 0, timeout: 5000 });
+            }
+        }
+
+        function updatePosition(pos) {
+            const acc = pos.coords.accuracy;
+            document.getElementById('accuracy-val').innerHTML = `${acc.toFixed(1)} <span class="text-xs">ม.</span>`;
+            
+            // Low-pass filter for accuracy (Ignore jitter > 25m)
+            if (acc > 25) {
+                document.getElementById('status-text').textContent = "สัญญาณอ่อน";
+                document.getElementById('status-text').className = "text-lg font-bold text-orange-400";
+                return;
+            }
+
+            // Smoothing: Simple Moving Average of last 3 positions
+            posHistory.push({lat: pos.coords.latitude, lon: pos.coords.longitude});
+            if(posHistory.length > 3) posHistory.shift();
+            
+            const avgLat = posHistory.reduce((a,b) => a + b.lat, 0) / posHistory.length;
+            const avgLon = posHistory.reduce((a,b) => a + b.lon, 0) / posHistory.length;
+
+            lastPos = { lat: avgLat, lon: avgLon };
+            document.getElementById('status-text').textContent = "ปกติ";
+            document.getElementById('status-text').className = "text-lg font-bold text-emerald-400";
+            document.getElementById('toggle-gps').textContent = "ปิด GPS";
+            document.getElementById('toggle-gps').classList.add('bg-red-600');
+            document.getElementById('record-point').disabled = false;
+            draw();
+        }
+
+        function recordPoint() {
+            if (!lastPos) return;
+            points.push({...lastPos});
+            document.getElementById('calc-area').disabled = points.length < 3;
+            draw();
+        }
+
+        // Improved Projection: Equirectangular approximation for small areas
+        function project(pts) {
+            if (pts.length === 0) return [];
+            const R = 6371000; // Earth Radius
+            const lat0 = pts[0].lat * Math.PI / 180;
+            const lon0 = pts[0].lon * Math.PI / 180;
+            
+            return pts.map(p => ({
+                x: (p.lon * Math.PI / 180 - lon0) * R * Math.cos(lat0),
+                y: (p.lat * Math.PI / 180 - lat0) * R
+            }));
+        }
+
+        function draw(fill = false) {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            let all = [...points];
+            if(lastPos) all.push(lastPos);
+            const proj = project(all);
+            if (proj.length < 1) return;
+
+            // Auto-scale logic
+            const xs = proj.map(p => p.x), ys = proj.map(p => p.y);
+            const minX = Math.min(...xs), maxX = Math.max(...xs);
+            const minY = Math.min(...ys), maxY = Math.max(...ys);
+            const w = maxX - minX, h = maxY - minY;
+            const scale = Math.min(320 / (w || 1), 270 / (h || 1));
+
+            ctx.save();
+            ctx.translate(canvas.width/2 - ((minX+maxX)/2)*scale, canvas.height/2 + ((minY+maxY)/2)*scale);
+            
+            // Draw Path
+            ctx.beginPath();
+            proj.forEach((p, i) => {
+                if(i < points.length) i === 0 ? ctx.moveTo(p.x*scale, -p.y*scale) : ctx.lineTo(p.x*scale, -p.y*scale);
+            });
+            
+            if(fill) {
+                ctx.closePath();
+                ctx.fillStyle = 'rgba(59, 130, 246, 0.2)';
+                ctx.fill();
+                ctx.strokeStyle = '#60a5fa';
+            } else {
+                ctx.strokeStyle = 'rgba(255,255,255,0.3)';
+                ctx.setLineDash([5, 5]);
+            }
+            ctx.lineWidth = 2;
+            ctx.stroke();
+
+            // Draw Points
+            proj.forEach((p, i) => {
+                ctx.setLineDash([]);
+                ctx.beginPath();
+                ctx.arc(p.x*scale, -p.y*scale, i === all.length-1 ? 6 : 4, 0, 7);
+                if (i === 0) ctx.fillStyle = '#10b981'; // Start
+                else if (i === all.length - 1) ctx.fillStyle = '#ef4444'; // Current Cursor
+                else ctx.fillStyle = '#facc15'; // Recorded
+                ctx.fill();
+            });
+            ctx.restore();
+        }
+
+        function calculateArea() {
+            const proj = project(points);
+            let area = 0;
+            for (let i = 0; i < proj.length; i++) {
+                let j = (i + 1) % proj.length;
+                area += proj[i].x * proj[j].y - proj[j].x * proj[i].y;
+            }
+            area = Math.abs(area / 2);
+            
+            const wa = area / 4;
+            const rai = Math.floor(wa / 400);
+            const ngan = Math.floor((wa % 400) / 100);
+            const sqWa = (wa % 100).toFixed(1);
+
+            document.getElementById('result-card').classList.remove('hidden');
+            document.getElementById('result-text').innerHTML = `
+                <p class="text-2xl font-bold text-white">${area.toLocaleString()} <span class="text-sm">ม.²</span></p>
+                <p class="text-blue-300">${rai} ไร่ ${ngan} งาน ${sqWa} ตร.ว.</p>
+            `;
+            draw(true);
+        }
+
+        document.getElementById('toggle-gps').onclick = toggleGPS;
+        document.getElementById('record-point').onclick = recordPoint;
+        document.getElementById('calc-area').onclick = calculateArea;
+        document.getElementById('clear-data').onclick = () => location.reload();
+    </script>
+</body>
+</html>
