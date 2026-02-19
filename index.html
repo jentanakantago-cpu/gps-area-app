@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GPS Area Pro - Full Function Edition</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Kanit:wght@300;400;600&display=swap');
+        body { font-family: 'Kanit', sans-serif; }
+        .accuracy-bar { transition: width 0.4s ease, background-color 0.4s ease; }
+        .custom-scrollbar::-webkit-scrollbar { width: 4px; }
+        .custom-scrollbar::-webkit-scrollbar-thumb { background: #4b5563; border-radius: 10px; }
+        @keyframes pulse-red { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+        .current-marker { animation: pulse-red 1s infinite; }
+    </style>
+</head>
+<body class="bg-gray-900 text-gray-100 min-h-screen p-4 flex flex-col items-center">
+
+    <div class="w-full max-w-md space-y-4">
+        <div class="bg-gray-800 p-6 rounded-3xl shadow-xl border border-gray-700">
+            <h1 class="text-2xl font-bold text-blue-400 text-center mb-4">🛰️ GPS Precision Pro</h1>
+            
+            <div class="bg-black/40 p-4 rounded-2xl border border-gray-600 space-y-2 mb-4">
+                <div class="flex justify-between items-center">
+                    <span id="status-display" class="font-bold text-red-400 text-sm">GPS ปิดอยู่</span>
+                    <span id="accuracy-text" class="text-[10px] font-mono text-gray-400">Accuracy: -- m</span>
+                </div>
+                <div class="w-full bg-gray-700 h-1.5 rounded-full overflow-hidden">
+                    <div id="accuracy-bar" class="accuracy-bar h-full w-0 bg-red-500"></div>
+                </div>
+            </div>
+
+            <div class="grid grid-cols-2 gap-3">
+                <button id="toggle-gps" class="bg-blue-600 hover:bg-blue-500 text-white font-bold py-3 rounded-xl transition-all">เปิด GPS</button>
+                <button id="record-btn" class="bg-emerald-600 hover:bg-emerald-500 text-white font-bold py-3 rounded-xl disabled:opacity-30 transition-all" disabled>📍 บันทึกจาก GPS</button>
+            </div>
+        </div>
+
+        <div class="bg-gray-800 p-5 rounded-3xl shadow-xl border border-gray-700">
+            <div class="flex justify-between items-center mb-3">
+                <h2 class="font-bold text-indigo-400 text-sm">📝 รายการจุดพิกัด</h2>
+                <div class="flex gap-2">
+                    <button id="undo-btn" class="bg-amber-600 hover:bg-amber-500 px-3 py-1 rounded-lg text-xs font-bold shadow-md transition-all disabled:opacity-30" disabled>
+                        ↩ ย้อนกลับ
+                    </button>
+                    <button id="add-manual-btn" class="bg-indigo-600 hover:bg-indigo-500 w-8 h-8 rounded-full flex items-center justify-center shadow-lg active:scale-90">
+                        <span class="text-xl font-bold text-white">+</span>
+                    </button>
+                </div>
+            </div>
+            <div id="points-container" class="max-h-52 overflow-y-auto space-y-2 pr-1 custom-scrollbar">
+                </div>
+        </div>
+
+        <div class="bg-gray-800 p-5 rounded-3xl shadow-xl border border-blue-500/30 space-y-4">
+            <div class="relative bg-gray-950 rounded-2xl overflow-hidden aspect-square border border-gray-700">
+                <canvas id="path-canvas" width="400" height="400" class="w-full h-full"></canvas>
+                <div id="dist-tag" class="absolute top-2 right-2 bg-black/60 text-[9px] px-2 py-1 rounded text-yellow-400 border border-yellow-500/30">รอบรูป: 0 m</div>
+            </div>
+
+            <div id="result-display" class="text-center p-4 bg-indigo-900/20 rounded-2xl border border-indigo-500/20 min-h-[60px] flex items-center justify-center">
+                <p class="text-gray-500 text-xs italic">บันทึกพิกัดให้ครบ 3 จุดเพื่อคำนวณ</p>
+            </div>
+
+            <div class="grid grid-cols-2 gap-3">
+                <button id="calculate-btn" class="bg-purple-600 hover:bg-purple-500 text-white font-bold py-3 rounded-xl disabled:opacity-30 transition-all" disabled>📐 คำนวณพื้นที่</button>
+                <button id="clear-btn" class="bg-gray-700 hover:bg-red-900 text-white font-bold py-3 rounded-xl transition-all">🗑️ ล้างทั้งหมด</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('path-canvas'), ctx = canvas.getContext('2d');
+        let points = [], watchId = null, currentPos = null;
+
+        function updateLocation(pos) {
+            const acc = pos.coords.accuracy;
+            document.getElementById('accuracy-text').textContent = `Accuracy: ${acc.toFixed(1)} m`;
+            document.getElementById('accuracy-bar').style.width = `${Math.max(5, 100 - (acc * 2))}%`;
+
+            if (acc <= 40) {
+                currentPos = { lat: pos.coords.latitude, lon: pos.coords.longitude };
+                document.getElementById('status-display').textContent = acc < 10 ? 'แม่นยำสูง' : 'ออนไลน์';
+                document.getElementById('status-display').className = acc < 10 ? 'font-bold text-emerald-400 text-sm' : 'font-bold text-yellow-400 text-sm';
+                document.getElementById('record-btn').disabled = false;
+                draw();
+            }
+        }
+
+        // สูตรคำนวณพิกัดแบบแม่นยำ (Fixed Projection)
+        function project(pts) {
+            if (pts.length === 0) return [];
+            const origin = pts[0]; 
+            const latRad = origin.lat * Math.PI / 180;
+            const metersPerLat = 111319.9;
+            const metersPerLon = 111319.9 * Math.cos(latRad);
+            
+            return pts.map(p => ({
+                x: (p.lon - origin.lon) * metersPerLon,
+                y: (p.lat - origin.lat) * metersPerLat 
+            }));
+        }
+
+        function draw(isCalculated = false) {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            const validPoints = points.filter(p => p.lat !== 0 && p.lon !== 0);
+            let all = [...validPoints];
+            if(currentPos && watchId && !isCalculated) all.push(currentPos);
+            
+            const proj = project(all);
+            if (proj.length === 0) return;
+
+            const xs = proj.map(p => p.x), ys = proj.map(p => p.y);
+            const minX = Math.min(...xs), maxX = Math.max(...xs), minY = Math.min(...ys), maxY = Math.max(...ys);
+            const scale = Math.min(320 / (maxX - minX || 1), 320 / (maxY - minY || 1));
+
+            ctx.save();
+            ctx.translate(canvas.width/2, canvas.height/2);
+            const offsetX = (minX + maxX) / 2, offsetY = (minY + maxY) / 2;
+
+            ctx.beginPath();
+            proj.forEach((p, i) => {
+                const dx = (p.x - offsetX) * scale, dy = -(p.y - offsetY) * scale;
+                if (i === 0) ctx.moveTo(dx, dy);
+                else ctx.lineTo(dx, dy);
+            });
+
+            if(isCalculated) {
+                ctx.closePath();
+                ctx.fillStyle = 'rgba(99, 102, 241, 0.3)';
+                ctx.fill();
+            } else {
+                ctx.setLineDash([5, 5]);
+            }
+            ctx.strokeStyle = '#4f46e5'; ctx.lineWidth = 3; ctx.stroke();
+
+            proj.forEach((p, i) => {
+                ctx.setLineDash([]);
+                ctx.beginPath();
+                const isCurrent = (i === all.length-1 && !isCalculated && watchId);
+                ctx.arc((p.x - offsetX) * scale, -(p.y - offsetY) * scale, isCurrent ? 6 : 4, 0, 7);
+                ctx.fillStyle = i === 0 ? '#10b981' : (isCurrent ? '#ef4444' : '#fbbf24');
+                ctx.fill();
+                ctx.strokeStyle = "white"; ctx.stroke();
+            });
+            ctx.restore();
+        }
+
+        function renderPointsList() {
+            const container = document.getElementById('points-container');
+            container.innerHTML = '';
+            points.forEach((p, index) => {
+                const div = document.createElement('div');
+                div.className = 'flex gap-2 items-center bg-gray-700/40 p-2 rounded-xl border border-gray-600';
+                div.innerHTML = `
+                    <span class="text-[10px] text-gray-500 w-4 font-mono">${index + 1}</span>
+                    <input type="number" step="any" class="w-full bg-gray-900 border border-gray-600 rounded px-2 py-1 text-[11px] text-blue-300" value="${p.lat || ''}" oninput="points[${index}].lat = parseFloat(this.value) || 0; draw(); updateUI();">
+                    <input type="number" step="any" class="w-full bg-gray-900 border border-gray-600 rounded px-2 py-1 text-[11px] text-blue-300" value="${p.lon || ''}" oninput="points[${index}].lon = parseFloat(this.value) || 0; draw(); updateUI();">
+                    <button onclick="points.splice(${index}, 1); renderPointsList();" class="text-red-500 px-2 font-bold hover:bg-red-500/10 rounded">✕</button>
+                `;
+                container.appendChild(div);
+            });
+            updateUI();
+        }
+
+        function updateUI() {
+            document.getElementById('calculate-btn').disabled = points.length < 3;
+            document.getElementById('undo-btn').disabled = points.length === 0;
+            updateDistance();
+            draw();
+        }
+
+        function calculateArea() {
+            const R = 6371000;
+            let area = 0;
+            const valid = points.filter(p => p.lat !== 0 && p.lon !== 0);
+            for (let i = 0; i < valid.length; i++) {
+                let p1 = valid[i], p2 = valid[(i + 1) % valid.length];
+                area += (p2.lon - p1.lon) * Math.PI / 180 * (2 + Math.sin(p1.lat * Math.PI / 180) + Math.sin(p2.lat * Math.PI / 180));
+            }
+            area = Math.abs(area * R * R / 2);
+            const wa = area / 4;
+            const r = Math.floor(wa / 400), n = Math.floor((wa % 400) / 100), w = (wa % 100).toFixed(1);
+            document.getElementById('result-display').innerHTML = `
+                <div>
+                    <p class="text-2xl font-black text-emerald-400">${area.toLocaleString(undefined,{maximumFractionDigits:1})} <span class="text-xs text-white">ตร.ม.</span></p>
+                    <p class="text-blue-300 font-bold text-sm">${r} ไร่ ${n} งาน ${w} ตร.ว.</p>
+                </div>`;
+            draw(true);
+        }
+
+        function updateDistance() {
+            let dist = 0;
+            const getD = (p1, p2) => {
+                const R = 6371e3, dLat = (p2.lat-p1.lat)*Math.PI/180, dLon = (p2.lon-p1.lon)*Math.PI/180;
+                const a = Math.sin(dLat/2)**2 + Math.cos(p1.lat*Math.PI/180)*Math.cos(p2.lat*Math.PI/180)*Math.sin(dLon/2)**2;
+                return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+            };
+            const valid = points.filter(p => p.lat !== 0 && p.lon !== 0);
+            for(let i=0; i<valid.length-1; i++) dist += getD(valid[i], valid[i+1]);
+            if(valid.length > 2) dist += getD(valid[valid.length-1], valid[0]);
+            document.getElementById('dist-tag').textContent = `รอบรูป: ${dist.toFixed(1)} m`;
+        }
+
+        // Event Listeners
+        document.getElementById('toggle-gps').onclick = function() {
+            if (watchId) {
+                navigator.geolocation.clearWatch(watchId);
+                watchId = null; this.textContent = "เปิด GPS"; this.className = "bg-blue-600 font-bold py-3 rounded-xl transition-all w-full";
+                document.getElementById('status-display').textContent = 'GPS ปิดอยู่';
+            } else {
+                watchId = navigator.geolocation.watchPosition(updateLocation, (e)=>alert(e.message), {enableHighAccuracy:true});
+                this.textContent = "ปิด GPS"; this.className = "bg-red-600 font-bold py-3 rounded-xl transition-all w-full";
+            }
+        };
+
+        document.getElementById('record-btn').onclick = () => { if(currentPos) { points.push({...currentPos}); renderPointsList(); } };
+        document.getElementById('add-manual-btn').onclick = () => { points.push({lat: 0, lon: 0}); renderPointsList(); };
+        document.getElementById('undo-btn').onclick = () => { points.pop(); renderPointsList(); };
+        document.getElementById('calculate-btn').onclick = calculateArea;
+        document.getElementById('clear-btn').onclick = () => confirm('ลบข้อมูลทั้งหมด?') && location.reload();
+    </script>
+</body>
+</html>
